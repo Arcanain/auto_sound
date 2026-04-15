@@ -174,6 +174,8 @@ AutoSoundNode::AutoSoundNode(const rclcpp::NodeOptions& options)
   publish_rate_hz_ = declare_parameter<double>("publish_rate_hz", 30.0);
   path_topic_ = declare_parameter<std::string>("path_topic", "tgt_path");
   odom_topic_ = declare_parameter<std::string>("odom_topic", "odom");
+  obstacle_detected_topic_ =
+      declare_parameter<std::string>("obstacle_detected_topic", "obstacle_detected");
 
   path_width_ = declare_parameter<double>("path_width", 0.15);
   detection_radius_ = declare_parameter<double>("detection_radius", 1.0);
@@ -189,6 +191,10 @@ AutoSoundNode::AutoSoundNode(const rclcpp::NodeOptions& options)
   enable_sound_ = declare_parameter<bool>("enable_sound", true);
   audio_player_ = declare_parameter<std::string>("audio_player", "auto");
   const auto start_sound = declare_parameter<std::string>("start_sound", "start.wav");
+  const auto obstacle_sound =
+      declare_parameter<std::string>("obstacle_sound", "obstacle.wav");
+  obstacle_sound_cooldown_sec_ =
+      declare_parameter<double>("obstacle_sound_cooldown_sec", 5.0);
 
   ordered_cue_radius_ = declare_parameter<double>("ordered_cue_radius", 1.0);
   const auto ordered_sound_cues = declare_parameter<std::vector<std::string>>(
@@ -215,6 +221,11 @@ AutoSoundNode::AutoSoundNode(const rclcpp::NodeOptions& options)
   if (ordered_cue_radius_ < 0.0) {
     ordered_cue_radius_ = 0.0;
   }
+  if (!std::isfinite(obstacle_sound_cooldown_sec_) || obstacle_sound_cooldown_sec_ < 0.0) {
+    RCLCPP_WARN(get_logger(),
+                "obstacle_sound_cooldown_sec must be >= 0.0. Using 0.0.");
+    obstacle_sound_cooldown_sec_ = 0.0;
+  }
 
   if (enable_sound_) {
     if (audio_player_ == "auto") {
@@ -239,6 +250,12 @@ AutoSoundNode::AutoSoundNode(const rclcpp::NodeOptions& options)
   if (!start_sound_path_.empty() && !FileExists(start_sound_path_)) {
     RCLCPP_WARN(get_logger(), "Start sound not found: %s", start_sound_path_.c_str());
     start_sound_path_.clear();
+  }
+  obstacle_sound_path_ = ResolveSoundPath(obstacle_sound, pkg_share);
+  if (!obstacle_sound_path_.empty() && !FileExists(obstacle_sound_path_)) {
+    RCLCPP_WARN(get_logger(), "Obstacle sound not found: %s",
+                obstacle_sound_path_.c_str());
+    obstacle_sound_path_.clear();
   }
 
   ordered_sound_cues_.clear();
@@ -269,9 +286,18 @@ AutoSoundNode::AutoSoundNode(const rclcpp::NodeOptions& options)
   }
 
   next_ordered_cue_index_ = 0;
+  ObstacleSoundTrigger::Params obstacle_sound_params;
+  obstacle_sound_params.cooldown_sec = obstacle_sound_cooldown_sec_;
+  obstacle_sound_trigger_.Reset(obstacle_sound_params);
+  pending_obstacle_sound_ = false;
   RCLCPP_INFO(get_logger(),
               "Loaded %zu ordered sound cues (radius: %.2f m).",
               ordered_sound_cues_.size(), ordered_cue_radius_);
+  if (enable_sound_ && !obstacle_sound_path_.empty()) {
+    RCLCPP_INFO(get_logger(),
+                "Obstacle sound subscribed on '%s' with %.1f s cooldown.",
+                obstacle_detected_topic_.c_str(), obstacle_sound_cooldown_sec_);
+  }
 
   if (enable_sound_ && !start_sound_path_.empty()) {
     state_ = RunState::kStartSound;
@@ -286,6 +312,9 @@ AutoSoundNode::AutoSoundNode(const rclcpp::NodeOptions& options)
   path_sub_ = create_subscription<nav_msgs::msg::Path>(
       path_topic_, rclcpp::QoS(10),
       [this](const nav_msgs::msg::Path::SharedPtr msg) { OnPath(msg); });
+  obstacle_detected_sub_ = create_subscription<std_msgs::msg::Bool>(
+      obstacle_detected_topic_, rclcpp::QoS(10),
+      [this](const std_msgs::msg::Bool::SharedPtr msg) { OnObstacleDetected(msg); });
 
   path_marker_pub_ = create_publisher<visualization_msgs::msg::Marker>(
       "path_marker", rclcpp::QoS(1).transient_local());
@@ -316,10 +345,33 @@ void AutoSoundNode::OnPath(const nav_msgs::msg::Path::SharedPtr msg) {
   path_received_ = !path_points_.empty();
 }
 
-void AutoSoundNode::StartSoundAsync(const std::string& sound_path,
+void AutoSoundNode::OnObstacleDetected(const std_msgs::msg::Bool::SharedPtr msg) {
+  if (!msg) {
+    return;
+  }
+
+  const bool should_trigger =
+      obstacle_sound_trigger_.ShouldTrigger(msg->data, now().seconds());
+  if (!should_trigger || !enable_sound_ || obstacle_sound_path_.empty()) {
+    return;
+  }
+
+  if (pending_obstacle_sound_) {
+    RCLCPP_DEBUG(get_logger(),
+                 "Obstacle alert already pending. Skipping duplicate queue request.");
+    return;
+  }
+
+  pending_obstacle_sound_ = true;
+  RCLCPP_INFO(get_logger(),
+              "Obstacle detected. Queueing obstacle sound (cooldown: %.1f s).",
+              obstacle_sound_cooldown_sec_);
+}
+
+bool AutoSoundNode::StartSoundAsync(const std::string& sound_path,
                                     const std::string& label) {
   if (!enable_sound_ || sound_path.empty() || sound_future_.valid()) {
-    return;
+    return false;
   }
 
   sound_label_ = label;
@@ -334,6 +386,7 @@ void AutoSoundNode::StartSoundAsync(const std::string& sound_path,
     }
     return ret;
   });
+  return true;
 }
 
 bool AutoSoundNode::IsSoundFinished() {
@@ -432,6 +485,17 @@ void AutoSoundNode::OnTimer() {
       }
     }
     return;
+  }
+
+  if (pending_obstacle_sound_) {
+    if (sound_future_.valid()) {
+      return;
+    }
+
+    pending_obstacle_sound_ = false;
+    if (StartSoundAsync(obstacle_sound_path_, "obstacle")) {
+      return;
+    }
   }
 
   if (!odom_received_ || !path_received_ || sound_future_.valid()) {

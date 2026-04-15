@@ -19,6 +19,45 @@ double NormalizeAngle(double angle) {
 
 }  // namespace
 
+ObstacleSoundTrigger::ObstacleSoundTrigger() { Reset(Params{}); }
+
+ObstacleSoundTrigger::ObstacleSoundTrigger(const Params& params) { Reset(params); }
+
+void ObstacleSoundTrigger::Reset(const Params& params) {
+  params_ = params;
+  if (!std::isfinite(params_.cooldown_sec) || params_.cooldown_sec < 0.0) {
+    params_.cooldown_sec = 0.0;
+  }
+  last_obstacle_detected_ = false;
+  has_last_trigger_time_ = false;
+  last_trigger_time_sec_ = 0.0;
+}
+
+bool ObstacleSoundTrigger::ShouldTrigger(bool obstacle_detected, double now_sec) {
+  if (!std::isfinite(now_sec)) {
+    now_sec = 0.0;
+  }
+
+  if (!obstacle_detected) {
+    last_obstacle_detected_ = false;
+    return false;
+  }
+
+  if (last_obstacle_detected_) {
+    return false;
+  }
+  last_obstacle_detected_ = true;
+
+  if (has_last_trigger_time_ && now_sec >= last_trigger_time_sec_ &&
+      (now_sec - last_trigger_time_sec_) < params_.cooldown_sec) {
+    return false;
+  }
+
+  last_trigger_time_sec_ = now_sec;
+  has_last_trigger_time_ = true;
+  return true;
+}
+
 AutoSoundComponent::AutoSoundComponent() { Reset(Params{}); }
 
 AutoSoundComponent::AutoSoundComponent(const Params& params) { Reset(params); }

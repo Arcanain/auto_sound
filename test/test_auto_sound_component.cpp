@@ -60,3 +60,31 @@ TEST(AutoSoundComponent, StepStraight) {
 
   auto_sound::test::WriteLines(output_path, results);
 }
+
+TEST(ObstacleSoundTrigger, SuppressesContinuousTrueAndCooldownRetriggers) {
+  auto_sound::ObstacleSoundTrigger::Params params;
+  params.cooldown_sec = 5.0;
+  auto_sound::ObstacleSoundTrigger trigger(params);
+
+  EXPECT_TRUE(trigger.ShouldTrigger(true, 10.0));
+  EXPECT_FALSE(trigger.ShouldTrigger(true, 10.1));
+
+  EXPECT_FALSE(trigger.ShouldTrigger(false, 10.2));
+  EXPECT_FALSE(trigger.ShouldTrigger(true, 12.0));
+  EXPECT_FALSE(trigger.ShouldTrigger(true, 12.1));
+
+  EXPECT_FALSE(trigger.ShouldTrigger(false, 12.2));
+  EXPECT_TRUE(trigger.ShouldTrigger(true, 15.1));
+}
+
+TEST(ObstacleSoundTrigger, NegativeCooldownIsClampedToZero) {
+  auto_sound::ObstacleSoundTrigger::Params params;
+  params.cooldown_sec = -1.0;
+  auto_sound::ObstacleSoundTrigger trigger(params);
+
+  EXPECT_TRUE(trigger.ShouldTrigger(true, 1.0));
+  EXPECT_FALSE(trigger.ShouldTrigger(true, 1.1));
+
+  EXPECT_FALSE(trigger.ShouldTrigger(false, 1.2));
+  EXPECT_TRUE(trigger.ShouldTrigger(true, 1.3));
+}

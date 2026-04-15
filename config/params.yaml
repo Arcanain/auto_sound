@@ -4,6 +4,7 @@ auto_sound_node:
     publish_rate_hz: 30.0
     path_topic: tgt_path
     odom_topic: odom
+    obstacle_detected_topic: obstacle_detected
 
     path_width: 0.15
     path_color_rgba: [1.0, 0.7, 0.1, 1.0]
@@ -14,6 +15,8 @@ auto_sound_node:
     enable_sound: true
     audio_player: auto
     start_sound: start.wav
+    obstacle_sound: obstacle.wav
+    obstacle_sound_cooldown_sec: 5.0
 
     ordered_cue_radius: 1.0
     ordered_sound_cues:

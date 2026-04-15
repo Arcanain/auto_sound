@@ -5,6 +5,29 @@
 
 namespace auto_sound {
 
+class ObstacleSoundTrigger {
+ public:
+  struct Params {
+    double cooldown_sec{5.0};
+  };
+
+  ObstacleSoundTrigger();
+  explicit ObstacleSoundTrigger(const Params& params);
+
+  void Reset(const Params& params);
+  bool ShouldTrigger(bool obstacle_detected, double now_sec);
+
+  const Params& params() const { return params_; }
+  bool has_last_trigger_time() const { return has_last_trigger_time_; }
+  double last_trigger_time_sec() const { return last_trigger_time_sec_; }
+
+ private:
+  Params params_{};
+  bool last_obstacle_detected_{false};
+  bool has_last_trigger_time_{false};
+  double last_trigger_time_sec_{0.0};
+};
+
 struct Pose2D {
   double x{0.0};
   double y{0.0};
