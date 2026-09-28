@@ -17,6 +17,11 @@ auto_sound_node:
     start_sound: start.wav
     obstacle_sound: obstacle.wav
     obstacle_sound_cooldown_sec: 5.0
+    plate_number_topic: plate_number
+    plate_repeat_suppression_sec: 1800.0
+    plate_prefix_sound: plate_prefix.mp3
+    plate_suffix_sound: plate_suffix.mp3
+    digit_sound_directory: number
 
     ordered_cue_radius: 1.0
     ordered_sound_cues:

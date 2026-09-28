@@ -195,6 +195,16 @@ AutoSoundNode::AutoSoundNode(const rclcpp::NodeOptions& options)
       declare_parameter<std::string>("obstacle_sound", "obstacle.wav");
   obstacle_sound_cooldown_sec_ =
       declare_parameter<double>("obstacle_sound_cooldown_sec", 5.0);
+  plate_number_topic_ =
+      declare_parameter<std::string>("plate_number_topic", "plate_number");
+  plate_repeat_suppression_sec_ =
+      declare_parameter<double>("plate_repeat_suppression_sec", 1800.0);
+  const auto plate_prefix_sound =
+      declare_parameter<std::string>("plate_prefix_sound", "plate_prefix.mp3");
+  const auto plate_suffix_sound =
+      declare_parameter<std::string>("plate_suffix_sound", "plate_suffix.mp3");
+  const auto digit_sound_directory =
+      declare_parameter<std::string>("digit_sound_directory", "number");
 
   ordered_cue_radius_ = declare_parameter<double>("ordered_cue_radius", 1.0);
   const auto ordered_sound_cues = declare_parameter<std::vector<std::string>>(
@@ -226,6 +236,12 @@ AutoSoundNode::AutoSoundNode(const rclcpp::NodeOptions& options)
                 "obstacle_sound_cooldown_sec must be >= 0.0. Using 0.0.");
     obstacle_sound_cooldown_sec_ = 0.0;
   }
+  if (!std::isfinite(plate_repeat_suppression_sec_) ||
+      plate_repeat_suppression_sec_ < 0.0) {
+    RCLCPP_WARN(get_logger(),
+                "plate_repeat_suppression_sec must be >= 0.0. Using 1800.0.");
+    plate_repeat_suppression_sec_ = 1800.0;
+  }
 
   if (enable_sound_) {
     if (audio_player_ == "auto") {
@@ -256,6 +272,25 @@ AutoSoundNode::AutoSoundNode(const rclcpp::NodeOptions& options)
     RCLCPP_WARN(get_logger(), "Obstacle sound not found: %s",
                 obstacle_sound_path_.c_str());
     obstacle_sound_path_.clear();
+  }
+
+  plate_prefix_sound_path_ = ResolveSoundPath(plate_prefix_sound, pkg_share);
+  plate_suffix_sound_path_ = ResolveSoundPath(plate_suffix_sound, pkg_share);
+  plate_sound_ready_ = FileExists(plate_prefix_sound_path_) &&
+                       FileExists(plate_suffix_sound_path_);
+  for (std::size_t digit = 0; digit < digit_sound_paths_.size(); ++digit) {
+    const std::string digit_sound =
+        digit_sound_directory + "/" + std::to_string(digit) + ".mp3";
+    digit_sound_paths_[digit] = ResolveSoundPath(digit_sound, pkg_share);
+    plate_sound_ready_ = plate_sound_ready_ && FileExists(digit_sound_paths_[digit]);
+  }
+  if (!plate_sound_ready_) {
+    RCLCPP_WARN(
+        get_logger(),
+        "Plate sounds are incomplete. Add %s, %s and %s/{0..9}.mp3; "
+        "plate announcements are disabled.",
+        plate_prefix_sound_path_.c_str(), plate_suffix_sound_path_.c_str(),
+        ResolveSoundPath(digit_sound_directory, pkg_share).c_str());
   }
 
   ordered_sound_cues_.clear();
@@ -315,6 +350,9 @@ AutoSoundNode::AutoSoundNode(const rclcpp::NodeOptions& options)
   obstacle_detected_sub_ = create_subscription<std_msgs::msg::Bool>(
       obstacle_detected_topic_, rclcpp::QoS(10),
       [this](const std_msgs::msg::Bool::SharedPtr msg) { OnObstacleDetected(msg); });
+  plate_number_sub_ = create_subscription<std_msgs::msg::String>(
+      plate_number_topic_, rclcpp::QoS(10),
+      [this](const std_msgs::msg::String::SharedPtr msg) { OnPlateNumber(msg); });
 
   path_marker_pub_ = create_publisher<visualization_msgs::msg::Marker>(
       "path_marker", rclcpp::QoS(1).transient_local());
@@ -366,6 +404,40 @@ void AutoSoundNode::OnObstacleDetected(const std_msgs::msg::Bool::SharedPtr msg)
   RCLCPP_INFO(get_logger(),
               "Obstacle detected. Queueing obstacle sound (cooldown: %.1f s).",
               obstacle_sound_cooldown_sec_);
+}
+
+void AutoSoundNode::OnPlateNumber(const std_msgs::msg::String::SharedPtr msg) {
+  if (!msg || !enable_sound_ || !plate_sound_ready_) {
+    return;
+  }
+
+  const std::string& number = msg->data;
+  if (number.size() != 3 ||
+      !std::all_of(number.begin(), number.end(),
+                   [](unsigned char c) { return std::isdigit(c) != 0; })) {
+    return;
+  }
+
+  const double now_sec = now().seconds();
+  const auto previous = plate_last_queued_sec_.find(number);
+  if (previous != plate_last_queued_sec_.end() && now_sec >= previous->second &&
+      (now_sec - previous->second) < plate_repeat_suppression_sec_) {
+    RCLCPP_DEBUG(get_logger(), "Plate %s is within the repeat suppression period.",
+                 number.c_str());
+    return;
+  }
+
+  plate_sound_queue_.push_back({plate_prefix_sound_path_, "plate_prefix"});
+  for (const char digit : number) {
+    const std::size_t index = static_cast<std::size_t>(digit - '0');
+    plate_sound_queue_.push_back(
+        {digit_sound_paths_[index], "plate_digit_" + std::string(1, digit)});
+  }
+  plate_sound_queue_.push_back({plate_suffix_sound_path_, "plate_suffix"});
+  plate_last_queued_sec_[number] = now_sec;
+  RCLCPP_INFO(get_logger(),
+              "Queued plate announcement for %s (repeat suppression: %.0f sec).",
+              number.c_str(), plate_repeat_suppression_sec_);
 }
 
 bool AutoSoundNode::StartSoundAsync(const std::string& sound_path,
@@ -494,6 +566,17 @@ void AutoSoundNode::OnTimer() {
 
     pending_obstacle_sound_ = false;
     if (StartSoundAsync(obstacle_sound_path_, "obstacle")) {
+      return;
+    }
+  }
+
+  if (!plate_sound_queue_.empty()) {
+    if (sound_future_.valid()) {
+      return;
+    }
+    const auto clip = plate_sound_queue_.front();
+    if (StartSoundAsync(clip.path, clip.label)) {
+      plate_sound_queue_.pop_front();
       return;
     }
   }

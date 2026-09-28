@@ -2,11 +2,14 @@
 
 #include <array>
 #include <cstddef>
+#include <deque>
 #include <future>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -25,6 +28,7 @@ class AutoSoundNode : public rclcpp::Node {
   void OnOdometry(const nav_msgs::msg::Odometry::SharedPtr msg);
   void OnPath(const nav_msgs::msg::Path::SharedPtr msg);
   void OnObstacleDetected(const std_msgs::msg::Bool::SharedPtr msg);
+  void OnPlateNumber(const std_msgs::msg::String::SharedPtr msg);
   void PublishPathMarker();
   void PublishDetectionMarker();
   bool StartSoundAsync(const std::string& sound_path, const std::string& label);
@@ -42,10 +46,16 @@ class AutoSoundNode : public rclcpp::Node {
     std::string label{};
   };
 
+  struct SoundClip {
+    std::string path{};
+    std::string label{};
+  };
+
   rclcpp::TimerBase::SharedPtr timer_{};
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_{};
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_{};
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr obstacle_detected_sub_{};
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr plate_number_sub_{};
 
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr path_marker_pub_{};
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr detection_marker_pub_{};
@@ -73,6 +83,14 @@ class AutoSoundNode : public rclcpp::Node {
   double obstacle_sound_cooldown_sec_{5.0};
   ObstacleSoundTrigger obstacle_sound_trigger_{};
   bool pending_obstacle_sound_{false};
+  std::string plate_number_topic_{};
+  double plate_repeat_suppression_sec_{1800.0};
+  bool plate_sound_ready_{false};
+  std::string plate_prefix_sound_path_{};
+  std::string plate_suffix_sound_path_{};
+  std::array<std::string, 10> digit_sound_paths_{};
+  std::deque<SoundClip> plate_sound_queue_{};
+  std::unordered_map<std::string, double> plate_last_queued_sec_{};
   double ordered_cue_radius_{1.0};
   std::vector<OrderedSoundCue> ordered_sound_cues_{};
   std::size_t next_ordered_cue_index_{0};
