@@ -15,6 +15,12 @@ auto_sound_node:
     enable_sound: true
     audio_player: auto
     start_sound: start.wav
+    # Start after start_sound finishes, then keep looping independently of cues.
+    # YouTube playback uses mpv, or yt-dlp + ffplay as a fallback.
+    enable_background_sound: true
+    background_sound_source: "https://www.youtube.com/watch?v=nXy8Ns6ywfo&list=RDnXy8Ns6ywfo&start_radio=1"
+    background_audio_player: auto
+    background_volume: 100.0
     obstacle_sound: obstacle.wav
     obstacle_sound_cooldown_sec: 5.0
     plate_number_topic: plate_number

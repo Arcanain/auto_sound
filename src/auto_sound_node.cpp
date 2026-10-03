@@ -14,6 +14,10 @@
 #include <utility>
 #include <vector>
 
+#include <csignal>
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <geometry_msgs/msg/point.hpp>
 
@@ -66,6 +70,10 @@ std::string ResolveSoundPath(const std::string& input, const std::string& pkg_sh
     return pkg_share + "/" + input;
   }
   return pkg_share + "/sounds/" + input;
+}
+
+bool IsUrl(const std::string& input) {
+  return input.rfind("http://", 0) == 0 || input.rfind("https://", 0) == 0;
 }
 
 struct OrderedCueConfig {
@@ -154,6 +162,27 @@ std::string DetectAudioPlayer() {
   return {};
 }
 
+std::string DetectBackgroundAudioPlayer(bool source_is_url, double volume) {
+  const int percent = static_cast<int>(std::lround(std::clamp(volume, 0.0, 100.0)));
+  if (CommandExists("mpv")) {
+    return "mpv --no-video --really-quiet --loop-file=inf --volume=" +
+           std::to_string(percent);
+  }
+  if (source_is_url && CommandExists("yt-dlp") && CommandExists("ffplay")) {
+    return "yt-dlp+ffplay";
+  }
+  if (CommandExists("cvlc")) {
+    const double gain = static_cast<double>(percent) / 100.0;
+    return "cvlc --intf dummy --no-video --loop --quiet --gain " +
+           std::to_string(gain);
+  }
+  if (!source_is_url && CommandExists("ffplay")) {
+    return "ffplay -nodisp -loglevel error -stream_loop -1 -volume " +
+           std::to_string(percent);
+  }
+  return {};
+}
+
 std::array<float, 4> ToColor(const std::vector<double>& values,
                              const std::array<float, 4>& fallback) {
   if (values.size() != 4) {
@@ -191,6 +220,14 @@ AutoSoundNode::AutoSoundNode(const rclcpp::NodeOptions& options)
   enable_sound_ = declare_parameter<bool>("enable_sound", true);
   audio_player_ = declare_parameter<std::string>("audio_player", "auto");
   const auto start_sound = declare_parameter<std::string>("start_sound", "start.wav");
+  enable_background_sound_ =
+      declare_parameter<bool>("enable_background_sound", true);
+  background_sound_source_ = declare_parameter<std::string>(
+      "background_sound_source",
+      "https://www.youtube.com/watch?v=nXy8Ns6ywfo&list=RDnXy8Ns6ywfo&start_radio=1");
+  background_audio_player_ =
+      declare_parameter<std::string>("background_audio_player", "auto");
+  background_volume_ = declare_parameter<double>("background_volume", 20.0);
   const auto obstacle_sound =
       declare_parameter<std::string>("obstacle_sound", "obstacle.wav");
   obstacle_sound_cooldown_sec_ =
@@ -242,6 +279,10 @@ AutoSoundNode::AutoSoundNode(const rclcpp::NodeOptions& options)
                 "plate_repeat_suppression_sec must be >= 0.0. Using 1800.0.");
     plate_repeat_suppression_sec_ = 1800.0;
   }
+  if (!std::isfinite(background_volume_)) {
+    background_volume_ = 20.0;
+  }
+  background_volume_ = std::clamp(background_volume_, 0.0, 100.0);
 
   if (enable_sound_) {
     if (audio_player_ == "auto") {
@@ -262,6 +303,28 @@ AutoSoundNode::AutoSoundNode(const rclcpp::NodeOptions& options)
 
   const std::string pkg_share =
       ament_index_cpp::get_package_share_directory("auto_sound");
+  if (!IsUrl(background_sound_source_)) {
+    background_sound_source_ = ResolveSoundPath(background_sound_source_, pkg_share);
+    if (!background_sound_source_.empty() && !FileExists(background_sound_source_)) {
+      RCLCPP_WARN(get_logger(), "Background sound not found: %s",
+                  background_sound_source_.c_str());
+      background_sound_source_.clear();
+    }
+  }
+  if (enable_background_sound_ && !background_sound_source_.empty()) {
+    if (background_audio_player_ == "auto") {
+      background_audio_player_ = DetectBackgroundAudioPlayer(
+          IsUrl(background_sound_source_), background_volume_);
+    }
+    if (background_audio_player_.empty() ||
+        (background_audio_player_ != "yt-dlp+ffplay" &&
+         !CommandExists(background_audio_player_))) {
+      RCLCPP_WARN(get_logger(),
+                  "No background audio player found. Install mpv/VLC, or set "
+                  "background_audio_player. Background sound is disabled.");
+      enable_background_sound_ = false;
+    }
+  }
   start_sound_path_ = ResolveSoundPath(start_sound, pkg_share);
   if (!start_sound_path_.empty() && !FileExists(start_sound_path_)) {
     RCLCPP_WARN(get_logger(), "Start sound not found: %s", start_sound_path_.c_str());
@@ -364,6 +427,8 @@ AutoSoundNode::AutoSoundNode(const rclcpp::NodeOptions& options)
       std::chrono::duration_cast<std::chrono::nanoseconds>(period),
       std::bind(&AutoSoundNode::OnTimer, this));
 }
+
+AutoSoundNode::~AutoSoundNode() { StopBackgroundSound(); }
 
 void AutoSoundNode::OnOdometry(const nav_msgs::msg::Odometry::SharedPtr msg) {
   robot_x_ = msg->pose.pose.position.x;
@@ -474,6 +539,73 @@ bool AutoSoundNode::IsSoundFinished() {
   return true;
 }
 
+void AutoSoundNode::StartBackgroundSound() {
+  if (!enable_sound_ || !enable_background_sound_ ||
+      background_sound_source_.empty() || background_sound_pid_ > 0) {
+    return;
+  }
+
+  std::string command;
+  if (background_audio_player_ == "yt-dlp+ffplay") {
+    const int percent = static_cast<int>(std::lround(background_volume_));
+    command =
+        "while true; do media_url=$(yt-dlp --no-playlist -f bestaudio "
+        "--get-url " +
+        ShellQuote(background_sound_source_) +
+        ") || { sleep 5; continue; }; "
+        "ffplay -nodisp -autoexit -loglevel error -volume " +
+        std::to_string(percent) +
+        " \"$media_url\"; sleep 1; done";
+  } else {
+    command = background_audio_player_ + " " + ShellQuote(background_sound_source_);
+  }
+  const pid_t pid = fork();
+  if (pid < 0) {
+    RCLCPP_ERROR(get_logger(), "Failed to fork background sound process.");
+    next_background_start_sec_ = now().seconds() + 5.0;
+    return;
+  }
+  if (pid == 0) {
+    setpgid(0, 0);
+    execl("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
+    _exit(127);
+  }
+
+  background_sound_pid_ = pid;
+  setpgid(pid, pid);
+  RCLCPP_INFO(get_logger(), "Background sound started at %.0f%% volume: %s",
+              background_volume_, background_sound_source_.c_str());
+}
+
+void AutoSoundNode::StopBackgroundSound() {
+  if (background_sound_pid_ <= 0) {
+    return;
+  }
+  kill(-background_sound_pid_, SIGTERM);
+  kill(background_sound_pid_, SIGTERM);
+  waitpid(background_sound_pid_, nullptr, 0);
+  background_sound_pid_ = -1;
+}
+
+void AutoSoundNode::MaintainBackgroundSound() {
+  if (!background_sound_allowed_ || !enable_background_sound_) {
+    return;
+  }
+  if (background_sound_pid_ > 0) {
+    int status = 0;
+    const pid_t result = waitpid(background_sound_pid_, &status, WNOHANG);
+    if (result == 0) {
+      return;
+    }
+    background_sound_pid_ = -1;
+    next_background_start_sec_ = now().seconds() + 5.0;
+    RCLCPP_WARN(get_logger(), "Background sound stopped; retrying in 5 seconds.");
+  }
+  if (now().seconds() >= next_background_start_sec_) {
+    StartBackgroundSound();
+  }
+}
+
 void AutoSoundNode::PublishPathMarker() {
   if (path_points_.size() < 2) {
     return;
@@ -542,6 +674,8 @@ void AutoSoundNode::PublishDetectionMarker() {
 void AutoSoundNode::OnTimer() {
   IsSoundFinished();
 
+  MaintainBackgroundSound();
+
   PublishPathMarker();
   PublishDetectionMarker();
 
@@ -554,9 +688,16 @@ void AutoSoundNode::OnTimer() {
         start_sound_started_ = true;
       } else {
         state_ = RunState::kRunning;
+        background_sound_allowed_ = true;
+        StartBackgroundSound();
       }
     }
     return;
+  }
+
+  if (!background_sound_allowed_) {
+    background_sound_allowed_ = true;
+    StartBackgroundSound();
   }
 
   if (pending_obstacle_sound_) {

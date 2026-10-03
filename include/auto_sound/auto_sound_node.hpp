@@ -8,6 +8,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <sys/types.h>
+
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <nav_msgs/msg/odometry.hpp>
@@ -22,6 +24,7 @@ namespace auto_sound {
 class AutoSoundNode : public rclcpp::Node {
  public:
   explicit AutoSoundNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
+  ~AutoSoundNode() override;
 
  private:
   void OnTimer();
@@ -33,6 +36,9 @@ class AutoSoundNode : public rclcpp::Node {
   void PublishDetectionMarker();
   bool StartSoundAsync(const std::string& sound_path, const std::string& label);
   bool IsSoundFinished();
+  void StartBackgroundSound();
+  void StopBackgroundSound();
+  void MaintainBackgroundSound();
 
   struct PathPoint {
     double x{0.0};
@@ -80,6 +86,13 @@ class AutoSoundNode : public rclcpp::Node {
   std::future<int> sound_future_{};
   std::string sound_label_{};
   bool start_sound_started_{false};
+  bool enable_background_sound_{true};
+  std::string background_sound_source_{};
+  std::string background_audio_player_{};
+  double background_volume_{20.0};
+  pid_t background_sound_pid_{-1};
+  bool background_sound_allowed_{false};
+  double next_background_start_sec_{0.0};
   double obstacle_sound_cooldown_sec_{5.0};
   ObstacleSoundTrigger obstacle_sound_trigger_{};
   bool pending_obstacle_sound_{false};
