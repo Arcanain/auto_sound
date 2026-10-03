@@ -15,6 +15,8 @@
 #include <vector>
 
 #include <csignal>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -137,6 +139,12 @@ bool CommandExists(const std::string& command) {
   }
   const std::string check = "command -v " + ShellQuote(name) + " >/dev/null 2>&1";
   return std::system(check.c_str()) == 0;
+}
+
+bool IsMpvCommand(const std::string& command) {
+  const std::string name = ExtractCommandName(command);
+  const auto slash = name.find_last_of('/');
+  return ((slash == std::string::npos) ? name : name.substr(slash + 1)) == "mpv";
 }
 
 std::string DetectAudioPlayer() {
@@ -301,6 +309,10 @@ AutoSoundNode::AutoSoundNode(const rclcpp::NodeOptions& options)
     }
   }
 
+  background_ipc_socket_ =
+      "/tmp/auto_sound_mpv_" + std::to_string(static_cast<long long>(getpid())) +
+      ".sock";
+
   const std::string pkg_share =
       ament_index_cpp::get_package_share_directory("auto_sound");
   if (!IsUrl(background_sound_source_)) {
@@ -428,7 +440,10 @@ AutoSoundNode::AutoSoundNode(const rclcpp::NodeOptions& options)
       std::bind(&AutoSoundNode::OnTimer, this));
 }
 
-AutoSoundNode::~AutoSoundNode() { StopBackgroundSound(); }
+AutoSoundNode::~AutoSoundNode() {
+  StopBackgroundSound();
+  unlink(background_ipc_socket_.c_str());
+}
 
 void AutoSoundNode::OnOdometry(const nav_msgs::msg::Odometry::SharedPtr msg) {
   robot_x_ = msg->pose.pose.position.x;
@@ -511,6 +526,7 @@ bool AutoSoundNode::StartSoundAsync(const std::string& sound_path,
     return false;
   }
 
+  SetBackgroundMuted(true);
   sound_label_ = label;
   const std::string command = audio_player_ + " " + ShellQuote(sound_path);
   const auto logger = get_logger();
@@ -536,6 +552,7 @@ bool AutoSoundNode::IsSoundFinished() {
   sound_future_.get();
   sound_future_ = std::future<int>();
   sound_label_.clear();
+  SetBackgroundMuted(false);
   return true;
 }
 
@@ -559,6 +576,13 @@ void AutoSoundNode::StartBackgroundSound() {
   } else {
     command = background_audio_player_ + " " + ShellQuote(background_sound_source_);
   }
+  background_uses_mpv_ = IsMpvCommand(background_audio_player_);
+  if (background_uses_mpv_) {
+    unlink(background_ipc_socket_.c_str());
+    command = background_audio_player_ + " --input-ipc-server=" +
+              ShellQuote(background_ipc_socket_) + " " +
+              ShellQuote(background_sound_source_);
+  }
   const pid_t pid = fork();
   if (pid < 0) {
     RCLCPP_ERROR(get_logger(), "Failed to fork background sound process.");
@@ -572,6 +596,8 @@ void AutoSoundNode::StartBackgroundSound() {
   }
 
   background_sound_pid_ = pid;
+  background_muted_ = false;
+  background_suspended_ = false;
   setpgid(pid, pid);
   RCLCPP_INFO(get_logger(), "Background sound started at %.0f%% volume: %s",
               background_volume_, background_sound_source_.c_str());
@@ -585,6 +611,59 @@ void AutoSoundNode::StopBackgroundSound() {
   kill(background_sound_pid_, SIGTERM);
   waitpid(background_sound_pid_, nullptr, 0);
   background_sound_pid_ = -1;
+  background_muted_ = false;
+  background_suspended_ = false;
+  unlink(background_ipc_socket_.c_str());
+}
+
+void AutoSoundNode::SetBackgroundMuted(bool muted) {
+  if (background_sound_pid_ <= 0 || background_muted_ == muted) {
+    return;
+  }
+
+  if (background_suspended_) {
+    if (!muted) {
+      kill(-background_sound_pid_, SIGCONT);
+      background_suspended_ = false;
+      background_muted_ = false;
+    }
+    return;
+  }
+
+  if (background_uses_mpv_) {
+    const int socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (socket_fd >= 0) {
+      sockaddr_un address{};
+      address.sun_family = AF_UNIX;
+      if (background_ipc_socket_.size() < sizeof(address.sun_path)) {
+        std::copy(background_ipc_socket_.begin(), background_ipc_socket_.end(),
+                  address.sun_path);
+        if (connect(socket_fd, reinterpret_cast<sockaddr*>(&address),
+                    sizeof(address)) == 0) {
+          const int volume = muted ? 0 : static_cast<int>(std::lround(background_volume_));
+          const std::string request =
+              "{\"command\":[\"set_property\",\"volume\"," +
+              std::to_string(volume) + "]}\n";
+          const ssize_t sent = send(socket_fd, request.data(), request.size(), MSG_NOSIGNAL);
+          close(socket_fd);
+          if (sent == static_cast<ssize_t>(request.size())) {
+            background_muted_ = muted;
+            return;
+          }
+        } else {
+          close(socket_fd);
+        }
+      } else {
+        close(socket_fd);
+      }
+    }
+  }
+
+  // Players without runtime volume control are paused as a safe silent fallback.
+  if (muted && kill(-background_sound_pid_, SIGSTOP) == 0) {
+    background_suspended_ = true;
+    background_muted_ = true;
+  }
 }
 
 void AutoSoundNode::MaintainBackgroundSound() {

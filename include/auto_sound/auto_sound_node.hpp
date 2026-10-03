@@ -39,6 +39,7 @@ class AutoSoundNode : public rclcpp::Node {
   void StartBackgroundSound();
   void StopBackgroundSound();
   void MaintainBackgroundSound();
+  void SetBackgroundMuted(bool muted);
 
   struct PathPoint {
     double x{0.0};
@@ -91,6 +92,10 @@ class AutoSoundNode : public rclcpp::Node {
   std::string background_audio_player_{};
   double background_volume_{20.0};
   pid_t background_sound_pid_{-1};
+  std::string background_ipc_socket_{};
+  bool background_uses_mpv_{false};
+  bool background_muted_{false};
+  bool background_suspended_{false};
   bool background_sound_allowed_{false};
   double next_background_start_sec_{0.0};
   double obstacle_sound_cooldown_sec_{5.0};
